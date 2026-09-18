@@ -73,9 +73,10 @@ function renderSpeakers(data) {
   state.agentSpeaker = null;
   $("separateBtn").disabled = true;
 
-  for (const sp of data.preview) {
+  data.preview.forEach((sp, i) => {
     const col = document.createElement("div");
     col.className = "col-md-6";
+    const id = `sp-${i}`; // safe DOM id; the radio VALUE keeps the real label
     const opening = sp.opening
       .map(
         (o) =>
@@ -86,8 +87,8 @@ function renderSpeakers(data) {
       <label class="speaker card h-100">
         <div class="card-body">
           <div class="form-check mb-2">
-            <input class="form-check-input" type="radio" name="agent" value="${escapeAttr(sp.label)}" id="sp-${escapeAttr(sp.label)}" />
-            <label class="form-check-label fw-semibold" for="sp-${escapeAttr(sp.label)}">${escapeHtml(sp.label)}</label>
+            <input class="form-check-input" type="radio" name="agent" value="${escapeAttr(sp.label)}" id="${id}" />
+            <label class="form-check-label fw-semibold" for="${id}">${escapeHtml(sp.label)}</label>
             <span class="badge text-bg-secondary ms-1">${sp.segmentCount} turns · ${sp.totalSpeakingSec}s</span>
           </div>
           <div class="opening small">${opening}</div>
@@ -95,7 +96,7 @@ function renderSpeakers(data) {
         </div>
       </label>`;
     box.appendChild(col);
-  }
+  });
 
   box.querySelectorAll('input[name="agent"]').forEach((r) =>
     r.addEventListener("change", (e) => {
@@ -172,5 +173,7 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function escapeAttr(s) {
-  return escapeHtml(s).replace(/\s+/g, "_");
+  // keep the real value (incl. spaces) so it round-trips as agentSpeaker;
+  // escapeHtml already neutralizes quotes for safe attribute embedding.
+  return escapeHtml(s);
 }
