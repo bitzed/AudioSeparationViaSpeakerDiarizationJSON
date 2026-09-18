@@ -1,0 +1,22 @@
+/* Small tweaks on top of Bootstrap. */
+
+.speaker {
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  border-width: 2px;
+}
+.speaker:hover {
+  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.08);
+}
+
+.opening .turn {
+  padding: 0.15rem 0;
+  border-bottom: 1px dashed var(--bs-border-color);
+}
+.opening .turn:last-child {
+  border-bottom: none;
+}
+
+audio {
+  height: 44px;
+}

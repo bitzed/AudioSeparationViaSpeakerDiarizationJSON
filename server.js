@@ -3,28 +3,69 @@
  * AudioSeparator — PoC web server.
  *
  * Flow:
- *   1. POST /api/transcribe  { url }
+ *   0. POST /api/upload      (multipart "file")
+ *        -> stores the audio in an ephemeral uploads dir, returns { uploadId }.
+ *   1. POST /api/transcribe  { url } | { uploadId }
  *        -> calls Zoom Scribe (sync, diarization) and returns the transcript
  *           plus a per-speaker preview so the user can pick the agent.
- *   2. POST /api/separate    { url, transcript, agentSpeaker, head, tail }
- *        -> downloads the audio, mutes the agent-solo regions with ffmpeg,
- *           and streams back the resulting audio file.
+ *           URL sources are sent by URL; uploads are sent as base64 bytes.
+ *   2. POST /api/separate    { url|uploadId, transcript, agentSpeaker, head, tail }
+ *        -> gets the audio (download or local upload), mutes the agent-solo
+ *           regions with ffmpeg, and streams back the resulting audio file.
  *
- * Everything is ephemeral: transcripts live in the browser only, and audio is
- * processed in a per-request temp dir that is deleted right after streaming.
- * The server keeps no state, which suits Cloud Run's stateless model.
+ * Everything is ephemeral: transcripts live in the browser only, uploads sit in
+ * a temp dir that is purged (old files) and dies with the container, and each
+ * separation runs in a per-request temp dir deleted right after streaming.
  */
 
 require("dotenv").config();
 const express = require("express");
+const multer = require("multer");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawn } = require("child_process");
+const crypto = require("crypto");
 const { transcribe, buildSpeakerPreview } = require("./lib/scribe");
-const { computeMuteRegions, buildVolumeFilter } = require("./lib/mute");
+const { computeMuteRegions } = require("./lib/mute");
+const { renderMuted } = require("./lib/render");
 
 const app = express();
+
+// ---- ephemeral uploads store ---------------------------------------------
+const UPLOAD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "audiosep-uploads-"));
+const UPLOAD_TTL_MS = 60 * 60 * 1000; // purge uploads older than 1h
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // Scribe sync limit is 100MB
+
+// best-effort age-based purge (runs on each upload)
+function purgeOldUploads() {
+  const now = Date.now();
+  for (const name of fs.readdirSync(UPLOAD_DIR)) {
+    const p = path.join(UPLOAD_DIR, name);
+    try {
+      if (now - fs.statSync(p).mtimeMs > UPLOAD_TTL_MS) fs.rmSync(p, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+// resolve an uploadId to a safe absolute path inside UPLOAD_DIR
+function uploadPath(uploadId) {
+  if (typeof uploadId !== "string" || !/^[a-f0-9]{32}(\.[a-z0-9]+)?$/i.test(uploadId)) return null;
+  const p = path.join(UPLOAD_DIR, path.basename(uploadId));
+  return fs.existsSync(p) ? p : null;
+}
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => {
+      const ext = (path.extname(file.originalname) || "").toLowerCase().replace(/[^.a-z0-9]/g, "");
+      cb(null, crypto.randomBytes(16).toString("hex") + ext);
+    },
+  }),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+});
 
 // ---- HTTP Basic auth (test gate) -----------------------------------------
 // Enabled when BASIC_AUTH_USER + BASIC_AUTH_PASS are set. Keeps this PoC from
@@ -47,14 +88,29 @@ if (BA_USER && BA_PASS) {
 app.use(express.json({ limit: "8mb" })); // transcripts can be a few hundred KB
 app.use(express.static(path.join(__dirname, "public")));
 
+// ---- 0) upload -----------------------------------------------------------
+app.post("/api/upload", upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+  purgeOldUploads();
+  res.json({ uploadId: req.file.filename, name: req.file.originalname, size: req.file.size });
+});
+
 // ---- 1) transcribe -------------------------------------------------------
 app.post("/api/transcribe", async (req, res) => {
   try {
-    const { url, language } = req.body || {};
-    if (!url || !/^https?:\/\//.test(url)) {
-      return res.status(400).json({ error: "A valid http(s) audio URL is required." });
+    const { url, uploadId, language } = req.body || {};
+    let source;
+    if (uploadId) {
+      const p = uploadPath(uploadId);
+      if (!p) return res.status(400).json({ error: "Unknown or expired uploadId." });
+      source = { base64: fs.readFileSync(p).toString("base64") };
+    } else if (url && /^https?:\/\//.test(url)) {
+      source = url;
+    } else {
+      return res.status(400).json({ error: "A valid audio URL or uploadId is required." });
     }
-    const transcript = await transcribe(url, language ? { language } : {});
+
+    const transcript = await transcribe(source, language ? { language } : {});
     const preview = buildSpeakerPreview(transcript);
     res.json({
       duration_sec: transcript.duration_sec,
@@ -76,26 +132,37 @@ app.post("/api/separate", async (req, res) => {
   const cleanup = () => fs.rm(workDir, { recursive: true, force: true }, () => {});
 
   try {
-    const { url, transcript, agentSpeaker, head, tail } = req.body || {};
+    const { url, uploadId, transcript, agentSpeaker, head, tail } = req.body || {};
     const segments = transcript?.result?.segments;
-    if (!url || !Array.isArray(segments) || !agentSpeaker) {
+    if (!Array.isArray(segments) || !agentSpeaker) {
       cleanup();
-      return res.status(400).json({ error: "url, transcript and agentSpeaker are required." });
+      return res.status(400).json({ error: "transcript and agentSpeaker are required." });
     }
 
-    // download the source audio (same URL the transcript came from)
-    const srcRes = await fetch(url);
-    if (!srcRes.ok) throw new Error(`Failed to fetch audio: ${srcRes.status}`);
-    await fs.promises.writeFile(inPath, Buffer.from(await srcRes.arrayBuffer()));
+    // obtain the source audio: local upload, or download from URL
+    if (uploadId) {
+      const p = uploadPath(uploadId);
+      if (!p) {
+        cleanup();
+        return res.status(400).json({ error: "Unknown or expired uploadId." });
+      }
+      await fs.promises.copyFile(p, inPath);
+    } else if (url && /^https?:\/\//.test(url)) {
+      const srcRes = await fetch(url);
+      if (!srcRes.ok) throw new Error(`Failed to fetch audio: ${srcRes.status}`);
+      await fs.promises.writeFile(inPath, Buffer.from(await srcRes.arrayBuffer()));
+    } else {
+      cleanup();
+      return res.status(400).json({ error: "A valid audio URL or uploadId is required." });
+    }
 
     const { regions, totalMuted } = computeMuteRegions(segments, agentSpeaker, {
       head: Number.isFinite(head) ? head : undefined,
       tail: Number.isFinite(tail) ? tail : undefined,
       duration: transcript.duration_sec,
     });
-    const filter = buildVolumeFilter(regions);
 
-    await runFfmpeg(["-y", "-i", inPath, "-af", filter, "-c:a", "aac", outPath]);
+    await renderMuted(inPath, outPath, regions);
 
     res.setHeader("Content-Type", "audio/mp4");
     res.setHeader("Content-Disposition", 'inline; filename="customer_only.m4a"');
@@ -114,18 +181,6 @@ app.post("/api/separate", async (req, res) => {
     res.status(502).json({ error: String(err.message || err) });
   }
 });
-
-function runFfmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const ff = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    ff.stderr.on("data", (d) => (stderr += d.toString()));
-    ff.on("error", reject);
-    ff.on("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-500)}`))
-    );
-  });
-}
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`AudioSeparator listening on :${PORT}`));

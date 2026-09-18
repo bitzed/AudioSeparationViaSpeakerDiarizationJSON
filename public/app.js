@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 
 let state = {
   transcript: null, // raw Scribe response
-  url: null,
+  source: null, // { url } | { uploadId }
   agentSpeaker: null,
 };
 
@@ -14,33 +14,55 @@ function fmtTime(sec) {
   const s = (sec % 60).toFixed(1).padStart(4, "0");
   return `${m}:${s}`;
 }
+const activeTab = () =>
+  $("tab-upload").classList.contains("active") ? "upload" : "url";
 
 // ---- step 1: transcribe --------------------------------------------------
 $("transcribeBtn").addEventListener("click", async () => {
-  const url = $("url").value.trim();
-  const language = $("lang").value.trim() || undefined;
-  if (!url) return setStatus("transcribeStatus", "Enter a URL first.", "err");
-
+  spin("transcribeSpin", true);
   toggle("transcribeBtn", true);
-  setStatus("transcribeStatus", "Transcribing with Zoom Scribe… (a few seconds)");
   try {
+    // resolve the audio source (upload first if needed)
+    if (activeTab() === "upload") {
+      const f = $("file").files[0];
+      if (!f) throw new Error("Choose a file first.");
+      setStatus("transcribeStatus", `Uploading ${f.name}…`);
+      const fd = new FormData();
+      fd.append("file", f);
+      const up = await fetch("/api/upload", { method: "POST", body: fd });
+      const upData = await up.json();
+      if (!up.ok) throw new Error(upData.error || "Upload failed.");
+      state.source = { uploadId: upData.uploadId };
+    } else {
+      const url = $("url").value.trim();
+      if (!url) throw new Error("Enter a URL first.");
+      state.source = { url };
+    }
+
+    const language = $("lang").value.trim() || undefined;
+    setStatus("transcribeStatus", "Transcribing with Zoom Scribe… (a few seconds)");
     const res = await fetch("/api/transcribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, language }),
+      body: JSON.stringify({ ...state.source, language }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || res.statusText);
 
     state.transcript = data.transcript;
-    state.url = url;
     renderSpeakers(data);
-    setStatus("transcribeStatus", "Done. Pick the agent below.", "ok");
+    setStatus("transcribeStatus", "Done. Pick the agent below.", "text-success");
   } catch (e) {
-    setStatus("transcribeStatus", `Failed: ${e.message}`, "err");
+    setStatus("transcribeStatus", `Failed: ${e.message}`, "text-danger");
   } finally {
+    spin("transcribeSpin", false);
     toggle("transcribeBtn", false);
   }
+});
+
+$("file").addEventListener("change", () => {
+  const f = $("file").files[0];
+  $("uploadInfo").textContent = f ? `${f.name} · ${(f.size / 1024 / 1024).toFixed(2)} MB` : "";
 });
 
 // ---- step 2: render speaker preview + pick agent -------------------------
@@ -52,20 +74,27 @@ function renderSpeakers(data) {
   $("separateBtn").disabled = true;
 
   for (const sp of data.preview) {
-    const card = document.createElement("label");
-    card.className = "speaker";
+    const col = document.createElement("div");
+    col.className = "col-md-6";
     const opening = sp.opening
-      .map((o) => `<div class="turn"><span>${fmtTime(o.start)}</span> ${escapeHtml(o.text)}</div>`)
+      .map(
+        (o) =>
+          `<div class="turn"><span class="text-secondary me-1">${fmtTime(o.start)}</span>${escapeHtml(o.text)}</div>`
+      )
       .join("");
-    card.innerHTML = `
-      <div class="speaker-head">
-        <input type="radio" name="agent" value="${escapeAttr(sp.label)}" />
-        <strong>${escapeHtml(sp.label)}</strong>
-        <span class="badge">${sp.segmentCount} turns · ${sp.totalSpeakingSec}s</span>
-      </div>
-      <div class="opening">${opening}</div>
-      <div class="hint">Select = this speaker is the AGENT (muted)</div>`;
-    box.appendChild(card);
+    col.innerHTML = `
+      <label class="speaker card h-100">
+        <div class="card-body">
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="radio" name="agent" value="${escapeAttr(sp.label)}" id="sp-${escapeAttr(sp.label)}" />
+            <label class="form-check-label fw-semibold" for="sp-${escapeAttr(sp.label)}">${escapeHtml(sp.label)}</label>
+            <span class="badge text-bg-secondary ms-1">${sp.segmentCount} turns · ${sp.totalSpeakingSec}s</span>
+          </div>
+          <div class="opening small">${opening}</div>
+          <div class="text-secondary mt-2" style="font-size:.75rem">Select = this speaker is the AGENT (muted)</div>
+        </div>
+      </label>`;
+    box.appendChild(col);
   }
 
   box.querySelectorAll('input[name="agent"]').forEach((r) =>
@@ -73,7 +102,7 @@ function renderSpeakers(data) {
       state.agentSpeaker = e.target.value;
       $("separateBtn").disabled = false;
       box.querySelectorAll(".speaker").forEach((c) =>
-        c.classList.toggle("selected", c.contains(e.target))
+        c.classList.toggle("border-success", c.contains(e.target))
       );
     })
   );
@@ -87,6 +116,7 @@ $("separateBtn").addEventListener("click", async () => {
   const head = parseFloat($("head").value);
   const tail = parseFloat($("tail").value);
 
+  spin("separateSpin", true);
   toggle("separateBtn", true);
   setStatus("separateStatus", "Muting agent & rendering audio…");
   try {
@@ -94,7 +124,7 @@ $("separateBtn").addEventListener("click", async () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        url: state.url,
+        ...state.source,
         transcript: state.transcript,
         agentSpeaker: state.agentSpeaker,
         head,
@@ -114,29 +144,33 @@ $("separateBtn").addEventListener("click", async () => {
     $("download").href = objUrl;
     $("resultMeta").textContent = `Muted ${regions} region(s), ${seconds}s of agent-solo speech.`;
     show("resultSection");
-    setStatus("separateStatus", "Done.", "ok");
+    setStatus("separateStatus", "Done.", "text-success");
   } catch (e) {
-    setStatus("separateStatus", `Failed: ${e.message}`, "err");
+    setStatus("separateStatus", `Failed: ${e.message}`, "text-danger");
   } finally {
+    spin("separateSpin", false);
     toggle("separateBtn", false);
   }
 });
 
 // ---- helpers -------------------------------------------------------------
-function setStatus(id, msg, kind) {
+function setStatus(id, msg, cls) {
   const el = $(id);
   el.textContent = msg;
-  el.className = "status" + (kind ? ` ${kind}` : "");
+  el.className = "small mt-2 " + (cls || "text-secondary");
 }
 function toggle(id, disabled) {
   $(id).disabled = disabled;
 }
+function spin(id, on) {
+  $(id).classList.toggle("d-none", !on);
+}
 function show(id) {
-  $(id).classList.remove("hidden");
+  $(id).classList.remove("d-none");
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function escapeAttr(s) {
-  return escapeHtml(s);
+  return escapeHtml(s).replace(/\s+/g, "_");
 }
