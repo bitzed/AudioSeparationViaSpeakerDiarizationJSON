@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AudioSeparator — mute the agent, keep the customer</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>AudioSeparator</h1>
+      <p class="lead">
+        Transcribe a call with Zoom Scribe (speaker diarization), pick which
+        speaker is the <strong>agent</strong>, and get an audio file with the
+        agent's solo speech muted — the customer and any double-talk stay
+        audible.
+      </p>
+
+      <!-- Step 1: input -->
+      <section class="card">
+        <h2>1. Audio source</h2>
+        <label for="url">Public audio URL (e.g. a GCS object URL)</label>
+        <input
+          id="url"
+          type="url"
+          placeholder="https://storage.googleapis.com/your-bucket/CID....mp4"
+        />
+        <div class="row">
+          <label for="lang">Language</label>
+          <input id="lang" type="text" value="ja-JP" class="lang" />
+        </div>
+        <button id="transcribeBtn">Transcribe</button>
+        <p id="transcribeStatus" class="status"></p>
+      </section>
+
+      <!-- Step 2: pick agent -->
+      <section id="pickSection" class="card hidden">
+        <h2>2. Which speaker is the agent? (their solo speech gets muted)</h2>
+        <p class="meta" id="meta"></p>
+        <div id="speakers" class="speakers"></div>
+
+        <div class="offsets">
+          <div>
+            <label for="head">Head offset (s) — extend mute earlier</label>
+            <input id="head" type="number" step="0.01" min="0" value="0.2" />
+          </div>
+          <div>
+            <label for="tail">Tail offset (s) — extend mute later</label>
+            <input id="tail" type="number" step="0.01" min="0" value="0.12" />
+          </div>
+        </div>
+
+        <button id="separateBtn" disabled>Separate audio</button>
+        <p id="separateStatus" class="status"></p>
+      </section>
+
+      <!-- Step 3: result -->
+      <section id="resultSection" class="card hidden">
+        <h2>3. Result</h2>
+        <p id="resultMeta" class="meta"></p>
+        <audio id="player" controls></audio>
+        <a id="download" class="download" download="customer_only.m4a">Download</a>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

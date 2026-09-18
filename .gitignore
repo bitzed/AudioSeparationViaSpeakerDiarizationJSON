@@ -1,0 +1,19 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# deps & build
+node_modules/
+npm-debug.log*
+
+# local audio / transcript artifacts (PoC scratch)
+*.mp4
+*.m4a
+*.wav
+*.srt
+transcription*.json
+output*.m4a
+
+# OS
+.DS_Store

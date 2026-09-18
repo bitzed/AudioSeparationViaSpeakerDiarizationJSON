@@ -1,0 +1,13 @@
+node_modules
+.git
+.env
+.env.*
+!env.sample
+*.mp4
+*.m4a
+*.wav
+*.srt
+transcription*.json
+output*.m4a
+.DS_Store
+npm-debug.log*

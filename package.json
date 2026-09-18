@@ -1,0 +1,20 @@
+{
+  "name": "audioseparator",
+  "version": "1.0.0",
+  "description": "PoC: transcribe a call with Zoom Scribe (diarization) and mute the agent's solo speech, keeping the customer (and double-talk) audible.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "cli:mute": "node mute-agent.js",
+    "cli:srt": "node json-to-srt.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "license": "MIT"
+}
