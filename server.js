@@ -30,6 +30,7 @@ const { computeMuteRegions } = require("./lib/mute");
 const { renderMuted } = require("./lib/render");
 
 const app = express();
+app.set("trust proxy", true); // Cloud Run sits behind a proxy (X-Forwarded-*)
 
 // ---- ephemeral uploads store ---------------------------------------------
 const UPLOAD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "audiosep-uploads-"));
@@ -74,6 +75,9 @@ const BA_USER = process.env.BASIC_AUTH_USER;
 const BA_PASS = process.env.BASIC_AUTH_PASS;
 if (BA_USER && BA_PASS) {
   app.use((req, res, next) => {
+    // /f/:id is a capability URL (128-bit random id) so Zoom Scribe can fetch
+    // an uploaded file without Basic credentials. Exempt it from the gate.
+    if (req.path.startsWith("/f/")) return next();
     const hdr = req.headers.authorization || "";
     const [scheme, encoded] = hdr.split(" ");
     if (scheme === "Basic" && encoded) {
@@ -95,6 +99,14 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
   res.json({ uploadId: req.file.filename, name: req.file.originalname, size: req.file.size });
 });
 
+// public capability route: serves an uploaded file so Zoom Scribe can fetch it
+// by URL (with a real extension). Exempt from Basic auth; id is 128-bit random.
+app.get("/f/:id", (req, res) => {
+  const p = uploadPath(req.params.id);
+  if (!p) return res.status(404).send("Not found.");
+  res.sendFile(p); // Content-Type inferred from the extension in the filename
+});
+
 // ---- 1) transcribe -------------------------------------------------------
 app.post("/api/transcribe", async (req, res) => {
   try {
@@ -103,7 +115,9 @@ app.post("/api/transcribe", async (req, res) => {
     if (uploadId) {
       const p = uploadPath(uploadId);
       if (!p) return res.status(400).json({ error: "Unknown or expired uploadId." });
-      source = { base64: fs.readFileSync(p).toString("base64") };
+      // hand Scribe a public URL to our own capability route (it needs a real
+      // file extension, which base64 payloads don't carry).
+      source = `${req.protocol}://${req.get("host")}/f/${uploadId}`;
     } else if (url && /^https?:\/\//.test(url)) {
       source = url;
     } else {
